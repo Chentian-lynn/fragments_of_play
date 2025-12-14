@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<title>three.js - pointerlock controls with glb scene</title>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+	<style>
+		#blocker {
+			position: absolute;
+			width: 100%;
+			height: 100%;
+			background-color: rgba(0, 0, 0, 0.5);
+		}
+
+		#instructions {
+			width: 100%;
+			height: 100%;
+			display: flex;
+			flex-direction: column;
+			justify-content: center;
+			align-items: center;
+			text-align: center;
+			font-size: 14px;
+			cursor: pointer;
+		}
+
+		#wasd-hint {
+			position: fixed;
+			left: 40px;
+			bottom: 20px;
+			width: 240px;
+			/* 根据图片比例可调 */
+			opacity: 1;
+			pointer-events: none;
+			/* 防止挡住点击 */
+			z-index: 10;
+			/* 确保在最上层 */
+		}
+
+		#interact-hint {
+			position: fixed;
+			top: 50%;
+			left: 50%;
+			transform: translate(-50%, -50%);
+			font-size: 64px;
+			font-weight: bold;
+			color: rgb(255, 255, 235);
+			text-shadow: 0 0 10px rgba(113, 113, 103, 0.7);
+			pointer-events: none;
+			opacity: 0;
+			transition: opacity 0.05s ease;
+			z-index: 20;
+		}
+
+		#tips-image {
+			position: fixed;
+			top: 50%;
+			left: 50%;
+			transform: translate(-50%, -50%);
+			width: 80%;
+			opacity: 0;
+			transition: opacity 0.3s ease;
+			pointer-events: none;
+			/* 防止挡住鼠标 */
+			z-index: 50;
+		}
+
+		#position-display {
+			position: fixed;
+			top: 20px;
+			right: 20px;
+			background: rgba(0, 0, 0, 0.5);
+			color: #00ffcc;
+			padding: 8px 12px;
+			border-radius: 6px;
+			font-family: monospace;
+			font-size: 14px;
+			z-index: 100;
+		}
+	</style>
+</head>
+
+<body>
+	<div id="blocker">
+		<div id="instructions">
+			<p style="font-size:36px">Click to play</p>
+			<p>Move: WASD<br />Jump: SPACE<br />Look: MOUSE</p>
+		</div>
+	</div>
+
+	<script type="importmap">
+      {
+        "imports": {
+          "three": "../build/three.module.js",
+          "three/addons/": "./jsm/"
+        }
+      }
+    </script>
+
+	<script type="module">
+		import * as THREE from 'three';
+		import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+		import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';    // ✅ 新增
+
+		let camera, scene, renderer, controls;
+		const objects = [];
+		const interactables = [];
+		const tips_paths = [];
+		let selected_tips = -1;
+		let raycaster;
+		let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+		let close_to_tips = false;
+		let prevTime = performance.now();
+		const velocity = new THREE.Vector3();
+		const direction = new THREE.Vector3();
+		const vertex = new THREE.Vector3();
+		const color = new THREE.Color();
+
+		init();
+
+		function init() {
+
+			camera = new THREE.PerspectiveCamera(80, window.innerWidth / window.innerHeight, 1, 500);
+			camera.position.y = 10;
+			camera.position.z = 5.8;
+			camera.position.x = 117;
+
+			scene = new THREE.Scene();
+
+			// ✅ 先加载 HDR 环境贴图
+			// const pmremGenerator = new THREE.PMREMGenerator(renderer);
+			// new RGBELoader()
+			//   .setPath('./textures/')
+			//   .load('environment.hdr', (hdr) => {
+			//     const envMap = pmremGenerator.fromEquirectangular(hdr).texture;
+			//     scene.environment = envMap;
+			//     scene.background = new THREE.Color(0xffffff);
+			//     hdr.dispose();
+			//   });
+
+			// ✅ 加载 glTF 场景
+			const gltfLoader = new GLTFLoader();
+			gltfLoader.load(
+				'./scene.glb',
+				(gltf) => {
+					gltf.scene.scale.set(3, 3, 3); // 按需调整
+					gltf.scene.position.set(0, 0, 0);
+					scene.add(gltf.scene);
+					scene.traverse((child) => {
+						if (child.isLight) {
+							child.intensity *= (1 / (5 * 5));
+						}
+					});
+					// 环境光补充
+					// const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 2);
+					// hemiLight.position.set(0, 200, 0);
+					// scene.add(hemiLight);
+					const ambient = new THREE.AmbientLight(0xffffff, 1.0);
+					scene.add(ambient);
+
+					console.log('✅ GLB scene loaded');
+				},
+				(xhr) => console.log(`Loading model... ${(xhr.loaded / xhr.total * 100).toFixed(1)}%`),
+				(err) => console.error('Error loading glb:', err)
+			);
+
+			// ✅ 创建一个发光方块（使用 emissive 模拟发光）
+			const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+			const boxMat = new THREE.MeshStandardMaterial({
+				color: 0xffff00,
+				emissive: 0xffff00,
+				emissiveIntensity: 3.0
+			});
+			// 			book: 90, 10, 30
+			// cd: 70, 10, -22
+			// road sign: 113, 10, 0
+			// tv: -45, 10, 6
+			// doll: -45, 2, -4
+			// tama: -66, 5, -4
+			// display: -92, 20, 10
+			// computer: -236, 13, 0
+			// gameboy: -156, 10, 0
+			const interactPositions = [
+				new THREE.Vector3(90, 10, 30),
+				new THREE.Vector3(70, 10, -22),
+				new THREE.Vector3(113, 10, 0),
+				new THREE.Vector3(-45, 10, 6),
+				new THREE.Vector3(-66, 5, -4),
+				new THREE.Vector3(-45, 2, 6),
+				new THREE.Vector3(-92, 20, 10),
+				new THREE.Vector3(-236, 13, 0),
+				new THREE.Vector3(-236, 13, 10),
+				new THREE.Vector3(-236, 13, -10),
+				new THREE.Vector3(-156, 10, 0),
+			];
+			const tips_path = [
+				'tips1.PNG',
+				'tips2.PNG',
+				'tips13.PNG',
+				'tips5.PNG',
+				'tips6.PNG',
+				'tips11.PNG',
+				'tips3.PNG',
+				'tips9.PNG',
+				'tips8.PNG',
+				'tips10.PNG',
+				'tips4.PNG',
+			]
+			for (let pos of interactPositions) {
+				const interactBox = new THREE.Mesh(boxGeo, boxMat);
+				interactBox.position.copy(pos); // 放在场景中某个位置
+				scene.add(interactBox);
+				interactables.push(interactBox);
+				tips_paths.push(tips_path[interactPositions.indexOf(pos)]);
+			}
+
+			// 控制器初始化（保持原逻辑）
+			controls = new PointerLockControls(camera, document.body);
+			const blocker = document.getElementById('blocker');
+			const instructions = document.getElementById('instructions');
+
+			instructions.addEventListener('click', () => controls.lock());
+			controls.addEventListener('lock', () => { instructions.style.display = 'none'; blocker.style.display = 'none'; });
+			controls.addEventListener('unlock', () => { blocker.style.display = 'block'; instructions.style.display = ''; });
+			scene.add(controls.object);
+
+			document.addEventListener('keydown', onKeyDown);
+			document.addEventListener('keyup', onKeyUp);
+
+			raycaster = new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(0, -1, 0), 0, 10);
+
+			// ✅ 添加基础地面（可保留）
+			const floorGeometry = new THREE.PlaneGeometry(2000, 2000, 100, 100);
+			floorGeometry.rotateX(-Math.PI / 2);
+			const floorMaterial = new THREE.MeshPhongMaterial({ color: 0x999999 });
+			const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+			floor.visible = false;
+			scene.add(floor);
+
+			// ✅ 渲染器
+			renderer = new THREE.WebGLRenderer({ antialias: true });
+			renderer.setClearColor(0x409690, 1);
+			renderer.outputColorSpace = THREE.SRGBColorSpace;
+			renderer.toneMapping = THREE.ACESFilmicToneMapping;
+			renderer.toneMappingExposure = 1.2;
+			renderer.setPixelRatio(window.devicePixelRatio);
+			renderer.setSize(window.innerWidth, window.innerHeight);
+			renderer.setAnimationLoop(animate);
+			document.body.appendChild(renderer.domElement);
+
+			window.addEventListener('resize', onWindowResize);
+		}
+
+		// ======== Player controls ========
+		function onKeyDown(event) {
+			switch (event.code) {
+				case 'ArrowUp':
+				case 'KeyW': moveForward = true; break;
+				case 'ArrowLeft':
+				case 'KeyA': moveLeft = true; break;
+				case 'ArrowDown':
+				case 'KeyS': moveBackward = true; break;
+				case 'ArrowRight':
+				case 'KeyD': moveRight = true; break;
+				case 'Space': if (canJump) velocity.y += 50; canJump = false; break;
+				case 'KeyE': if (close_to_tips) {
+					tipsImage.style.opacity = 1 - tipsImage.style.opacity;
+				} break;
+			}
+		}
+
+		function onKeyUp(event) {
+			switch (event.code) {
+				case 'ArrowUp':
+				case 'KeyW': moveForward = false; break;
+				case 'ArrowLeft':
+				case 'KeyA': moveLeft = false; break;
+				case 'ArrowDown':
+				case 'KeyS': moveBackward = false; break;
+				case 'ArrowRight':
+				case 'KeyD': moveRight = false; break;
+			}
+		}
+
+		function onWindowResize() {
+			camera.aspect = window.innerWidth / window.innerHeight;
+			camera.updateProjectionMatrix();
+			renderer.setSize(window.innerWidth, window.innerHeight);
+		}
+
+		const hint = document.getElementById('interact-hint');
+		const tipsImage = document.getElementById('tips-image');
+
+		function animate() {
+			const time = performance.now();
+			if (controls.isLocked === true) {
+				raycaster.ray.origin.copy(controls.object.position);
+				raycaster.ray.origin.y -= 10;
+				const intersections = raycaster.intersectObjects(objects, false);
+				const onObject = intersections.length > 0;
+				const delta = (time - prevTime) / 1000;
+				velocity.x -= velocity.x * 10.0 * delta;
+				velocity.z -= velocity.z * 10.0 * delta;
+				velocity.y -= 9.8 * 20.0 * delta;
+				direction.z = Number(moveForward) - Number(moveBackward);
+				direction.x = Number(moveRight) - Number(moveLeft);
+				direction.normalize();
+				if (moveForward || moveBackward) velocity.z -= direction.z * 200.0 * delta;
+				if (moveLeft || moveRight) velocity.x -= direction.x * 200.0 * delta;
+				if (onObject) { velocity.y = Math.max(0, velocity.y); canJump = true; }
+				controls.moveRight(-velocity.x * delta);
+				controls.moveForward(-velocity.z * delta);
+				controls.object.position.y += (velocity.y * delta);
+				if (controls.object.position.y < 15) {
+					velocity.y = 0;
+					controls.object.position.y = 15;
+					canJump = true;
+				}
+				// ======== Interact with scene ========
+				const cameraPos = controls.object.position;
+				let dist_to_center = 9999;
+				let idx = -1;
+				for (let i = 0; i < interactables.length; i++) {
+					interactables[i].rotation.y += delta; 
+					const boxPos = interactables[i].position;
+
+					const boxVector = new THREE.Vector3(boxPos.x, cameraPos.y, boxPos.z);
+					const distance = cameraPos.distanceTo(boxVector);
+					const threshold = 20;
+
+					if (distance < threshold) {
+						const proj = boxPos.clone().project(camera);
+						const screenX = (proj.x * 0.5 + 0.5);
+						const screenY = (proj.y * -0.5 + 0.5);
+						const screenZ = (proj.z * 0.5 + 0.5);
+
+						const nearCenter = Math.abs(screenX - 0.5) < 0.4 && 
+						Math.abs(screenY - 0.5) < 0.5 && screenZ > 0 && screenZ < 1;
+						const distance_to_center = Math.sqrt(Math.pow(screenX - 0.5, 2) 
+						+ Math.pow(screenY - 0.5, 2));
+						if (nearCenter) {
+							if (distance_to_center < dist_to_center) {
+								dist_to_center = distance_to_center;
+								idx = i;
+							}
+						}
+					}
+				}
+				// ======== show interact hint ========
+				if (idx >= 0) {
+					close_to_tips = true;
+					const boxPos = interactables[idx].position;
+					const projected = boxPos.clone().project(camera);
+					const x = (projected.x * 0.5 + 0.5) * window.innerWidth;
+					const y = (-projected.y * 0.5 + 0.5) * window.innerHeight;
+
+					hint.style.left = `${x}px`;
+					hint.style.top = `${y - 50}px`;
+					hint.style.opacity = 1; 
+
+					if (tipsImage.style.opacity == 1 && selected_tips !== idx) {
+						tipsImage.style.opacity = 0;
+					}
+					selected_tips = idx;
+					tipsImage.src = tips_paths[idx];
+				} else {
+					close_to_tips = false;
+					tipsImage.style.opacity = 0;
+					hint.style.opacity = 0;
+				}
+			}
+			prevTime = time;
+
+			// ======== ✅ 显示位置坐标 ========
+			const posHUD = document.getElementById('position-display');
+			if (posHUD && controls && controls.object) {
+				const p = controls.object.position;
+				posHUD.textContent = `Position: 
+					x=${p.x.toFixed(2)}, 
+					y=${p.y.toFixed(2)}, 
+					z=${p.z.toFixed(2)}`;
+			}
+
+			renderer.render(scene, camera);
+		}
+
+	</script>
+	<img id="wasd-hint" src="./wasd.png" alt="WASD" />
+	<div id="interact-hint">E</div>
+	<img id="tips-image" src="tips0.jpg" alt="Tip" />
+	<div id="position-display"></div>
+</body>
+
+</html>
